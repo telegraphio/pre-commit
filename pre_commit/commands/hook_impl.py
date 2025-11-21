@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os.path
 import subprocess
 import sys
 from collections.abc import Sequence
 
+from pre_commit.clientlib import load_config
 from pre_commit.commands.run import run
 from pre_commit.envcontext import envcontext
 from pre_commit.parse_shebang import normalize_cmd
 from pre_commit.store import Store
+
+logger = logging.getLogger('pre_commit')
 
 Z40 = '0' * 40
 
@@ -118,6 +122,7 @@ def _pre_push_ns(
         color: bool,
         args: Sequence[str],
         stdin: bytes,
+        skip_remote_sha_check: bool = False,
 ) -> argparse.Namespace | None:
     remote_name = args[0]
     remote_url = args[1]
@@ -127,7 +132,7 @@ def _pre_push_ns(
         local_branch, local_sha, remote_branch, remote_sha = parts
         if local_sha == Z40:
             continue
-        elif remote_sha != Z40 and _rev_exists(remote_sha):
+        elif not skip_remote_sha_check and remote_sha != Z40 and _rev_exists(remote_sha):
             return _ns(
                 'pre-push', color,
                 from_ref=remote_sha, to_ref=local_sha,
@@ -213,10 +218,11 @@ def _run_ns(
         color: bool,
         args: Sequence[str],
         stdin: bytes,
+        skip_remote_sha_check: bool = False,
 ) -> argparse.Namespace | None:
     _check_args_length(hook_type, args)
     if hook_type == 'pre-push':
-        return _pre_push_ns(color, args, stdin)
+        return _pre_push_ns(color, args, stdin, skip_remote_sha_check)
     elif hook_type in 'commit-msg':
         return _ns(hook_type, color, commit_msg_filename=args[0])
     elif hook_type == 'prepare-commit-msg' and len(args) == 1:
@@ -265,7 +271,20 @@ def hook_impl(
 ) -> int:
     retv, stdin = _run_legacy(hook_type, hook_dir, args)
     _validate_config(retv, config, skip_on_missing_config)
-    ns = _run_ns(hook_type, color, args, stdin)
+
+    # Load config to get skip-remote-sha-check setting (only for pre-push)
+    skip_remote_sha_check = False
+    if hook_type == 'pre-push':
+        try:
+            cfg = load_config(config)
+            skip_remote_sha_check = cfg.get('skip-remote-sha-check', False)
+            if skip_remote_sha_check:
+                logger.info('skip-remote-sha-check is enabled')
+        except Exception:
+            # If config loading fails, use safe default (False)
+            skip_remote_sha_check = False
+
+    ns = _run_ns(hook_type, color, args, stdin, skip_remote_sha_check)
     if ns is None:
         return retv
     else:
